@@ -225,12 +225,6 @@ if "start_date" not in st.session_state:
 if "end_date" not in st.session_state:
     st.session_state["end_date"] = max_date
 
-
-if "start_date" not in st.session_state:
-    st.session_state["start_date"] = min_date
-if "end_date" not in st.session_state:
-    st.session_state["end_date"] = max_date
-
 with st.sidebar.expander("Advanced", expanded=False):
     mask_land = st.checkbox("Hide cells over the sea", True, key="mask_land",
                             help="Natural Earth coastlines are simplified, so a few coastal cells fall in the sea, and FIRMS "
@@ -800,54 +794,94 @@ with tab_val:
         if has_area_val:
             a, b, c = st.columns(3)
             a.metric("Mapped total vs real MODIS", f"{cc.mapped.sum() / max(cc.real.sum(), 1e-9):.0%}",
-                     help="100% = identical total volume across the validation period.")
+                     help="100% = identical total volume across the validation period (all months).")
             b.metric("Months MODIS flags as high", f"{int(fr.sum())} of {len(cc)}")
             c.metric("Also flagged from VIIRS alone",
                      f"{int((fr & fm).sum())} of {int(fr.sum())}" if fr.sum() else "n/a",
                      help="Would responders receive the same high-fire warning once MODIS retires?")
 
-            left_col, right_col = st.columns([1.25, 1])
-            with left_col:
-                lim = float(max(cc.real.max(), cc.mapped.max()))
-                sc = (
-                    alt.Chart(cc).mark_circle(size=70, opacity=0.75, color="#1f77b4").encode(
-                        x=alt.X("real:Q", title=f"Real MODIS ({U} per month)"),
-                        y=alt.Y("mapped:Q", title=f"VIIRS mapped ({U} per month)"),
-                        tooltip=[
-                            alt.Tooltip("month:T", format="%b %Y", title="Month"),
-                            alt.Tooltip("real:Q", format=",.0f", title="Real MODIS"),
-                            alt.Tooltip("mapped:Q", format=",.0f", title="VIIRS mapped"),
-                        ],
-                    )
-                    + alt.Chart(pd.DataFrame({"x": [0, lim], "y": [0, lim]})).mark_line(
-                        color="#999999", strokeDash=[4, 3]
-                    ).encode(x="x:Q", y="y:Q")
-                )
-                st.markdown("**Predicted vs. real monthly activity**")
-                st.altair_chart(sc.properties(height=320), width="stretch")
+            # ---- zoom into a range of monthly detections (most months are small, a few are huge)
+            vmax = float(max(cc.real.max(), cc.mapped.max(), 1.0))
+            step = float(10 ** int(np.floor(np.log10(vmax))))          # 10,000 when the biggest month is 14,000
+            presets = {"All months": None}
+            for k in range(int(np.ceil(vmax / step))):
+                lo_ex, hi_k = (-1.0 if k == 0 else k * step), (k + 1) * step
+                if ((cc.real > lo_ex) & (cc.real <= hi_k)).any():          # only offer ranges that contain months
+                    presets[f"{0 if k == 0 else k * step + 1:,.0f} - {hi_k:,.0f}"] = (lo_ex, hi_k)
+            presets["Custom"] = "custom"
+            rc1, rc2 = st.columns([4, 1])
+            choice = rc1.radio(f"Show months where real MODIS recorded ({U})", list(presets), horizontal=True, key="val_range",
+                               help="Most months are small and a few are huge, so the big ones squash everything else. Pick a "
+                                    "range to zoom in; the chart, the table and the ratio below all follow it.")
+            log_scale = rc2.checkbox("Log scale", False, key="val_log",
+                                     help="Spreads out small months without cutting anything off.")
+            if choice == "All months":
+                mask, view_lo, view_hi = pd.Series(True, index=cc.index), 0.0, None
+            elif choice == "Custom":
+                cu1, cu2 = st.columns(2)
+                lo = cu1.number_input(f"From ({U})", min_value=0.0, value=0.0, step=step, key="val_lo")
+                hi = cu2.number_input(f"To ({U})", min_value=0.0, value=float(np.ceil(vmax)), step=step, key="val_hi")
+                lo, hi = (hi, lo) if lo > hi else (lo, hi)
+                mask, view_lo, view_hi = (cc.real >= lo) & (cc.real <= hi), lo, hi
+            else:
+                lo_ex, hi = presets[choice]
+                mask, view_lo, view_hi = (cc.real > lo_ex) & (cc.real <= hi), max(lo_ex, 0.0), hi
+            sel, fr_s, fm_s = cc[mask], fr[mask], fm[mask]
 
-            with right_col:
-                st.markdown("**Month-by-month comparison:**")
-                comp_tbl = pd.DataFrame({
-                    "Month": cc["month"].dt.strftime("%b %Y"),
-                    "Real MODIS": cc["real"].round(0),
-                    "VIIRS Mapped": cc["mapped"].round(0),
-                    "Diff": (cc["mapped"] - cc["real"]).round(0),
-                    "Alert Match": ["Both high" if (r and m) else ("Both normal" if (not r and not m) else "Mismatch")
-                                    for r, m in zip(fr, fm)],
-                })
-                st.dataframe(
-                    comp_tbl,
-                    hide_index=True,
-                    height=320,
-                    width="stretch",
-                    column_config={
-                        "Real MODIS": st.column_config.NumberColumn(format="%,.0f"),
-                        "VIIRS Mapped": st.column_config.NumberColumn(format="%,.0f"),
-                        "Diff": st.column_config.NumberColumn(format="%+,.0f"),
-                    },
-                )
-            st.caption(f"Sample size: {len(cc)} months ({after[0]:%d/%m/%Y} to {(after[-1] + pd.offsets.MonthEnd(0)):%d/%m/%Y}).")
+            if sel.empty:
+                st.info("No months fall in this range. Pick another range.")
+            else:
+                left_col, right_col = st.columns([1.25, 1])
+                with left_col:
+                    lim_hi = float(view_hi) if view_hi is not None else float(max(sel.real.max(), sel.mapped.max()))
+                    lim_lo = float(view_lo)
+                    y_lo = min(lim_lo, float(sel.mapped.min())) if view_hi is not None else 0.0
+                    y_hi = max(lim_hi, float(sel.mapped.max())) * 1.05
+                    kind = "symlog" if log_scale else "linear"
+                    xs = alt.Scale(type=kind, domain=[lim_lo, lim_hi]) if view_hi is not None else alt.Scale(type=kind)
+                    ys = alt.Scale(type=kind, domain=[y_lo, y_hi]) if view_hi is not None else alt.Scale(type=kind)
+                    sc = (
+                        alt.Chart(sel).mark_circle(size=70, opacity=0.75, color="#1f77b4", clip=True).encode(
+                            x=alt.X("real:Q", scale=xs, title=f"Real MODIS ({U} per month)"),
+                            y=alt.Y("mapped:Q", scale=ys, title=f"VIIRS mapped ({U} per month)"),
+                            tooltip=[
+                                alt.Tooltip("month:T", format="%b %Y", title="Month"),
+                                alt.Tooltip("real:Q", format=",.0f", title="Real MODIS"),
+                                alt.Tooltip("mapped:Q", format=",.0f", title="VIIRS mapped"),
+                            ],
+                        )
+                        + alt.Chart(pd.DataFrame({"x": [lim_lo, lim_hi], "y": [lim_lo, lim_hi]})).mark_line(
+                            color="#999999", strokeDash=[4, 3], clip=True
+                        ).encode(x=alt.X("x:Q", scale=xs), y=alt.Y("y:Q", scale=ys))
+                    )
+                    st.markdown("**Predicted vs. real monthly activity** (dashed line = perfect match; dots below it = estimate too low)")
+                    st.altair_chart(sc.properties(height=320), width="stretch")
+
+                with right_col:
+                    st.markdown("**Month-by-month comparison:**")
+                    comp_tbl = pd.DataFrame({
+                        "Month": sel["month"].dt.strftime("%b %Y"),
+                        "Real MODIS": sel["real"].round(0),
+                        "VIIRS Mapped": sel["mapped"].round(0),
+                        "Diff": (sel["mapped"] - sel["real"]).round(0),
+                        "Alert Match": ["Both high" if (r and m) else ("Both normal" if (not r and not m) else "Mismatch")
+                                        for r, m in zip(fr_s, fm_s)],
+                    })
+                    st.dataframe(
+                        comp_tbl,
+                        hide_index=True,
+                        height=320,
+                        width="stretch",
+                        column_config={
+                            "Real MODIS": st.column_config.NumberColumn(format="%d"),
+                            "VIIRS Mapped": st.column_config.NumberColumn(format="%d"),
+                            "Diff": st.column_config.NumberColumn(format="%+d"),
+                        },
+                    )
+                ratio_sel = sel.mapped.sum() / max(sel.real.sum(), 1e-9)
+                st.caption(f"In this range: {len(sel)} of {len(cc)} months; the VIIRS-based estimate is {ratio_sel:.0%} of real MODIS "
+                           f"({after[0]:%d/%m/%Y} to {(after[-1] + pd.offsets.MonthEnd(0)):%d/%m/%Y}). "
+                           "Small samples: read as evidence, not proof.")
         elif CONT_FILE.exists() and modis_last is not None:
             st.info("No MODIS activity after the cutoff in this area.")
         else:
