@@ -16,6 +16,7 @@ from streamlit_folium import st_folium
 from climatology import (anomaly_table, calendar_matrix, climatology, current_vs_history,
                          filter_bbox, filter_polygon, load_harmonized, monthly_series)
 from config import PROCESSED_DIR
+from limits import heavy
 from geo import (DETAIL_DEG, DETAIL_MAX_PIXELS, assign_province, count_overlay, land_geometry,
                  load_cities, load_provinces)
 
@@ -53,9 +54,20 @@ st.set_page_config(page_title="Burn Activity Calendar", layout="wide")
 
 
 # =============================================================== data + cached helpers
-@st.cache_data(show_spinner="Loading harmonized data...")
-def load():
-    return load_harmonized(DATA_FILE)
+@st.cache_resource(show_spinner="Loading harmonized data...")
+def load_prepared(_stamp, last_complete):
+    """ONE shared, read-only copy for every visitor (cache_data would hand each session and each rerun its own copy,
+    which is what exhausts memory when many people use the app at once). Never modify the returned frame."""
+    d = load_harmonized(DATA_FILE)
+    d = d[d.month >= pd.Timestamp("2002-07-01")]
+    if last_complete:
+        d = d[d.month <= pd.Timestamp(last_complete)]
+    d = d.reset_index(drop=True)
+    c = d[["cell_id", "lon", "lat"]].drop_duplicates("cell_id")
+    cp = pd.Series(assign_province(c.lon.to_numpy(), c.lat.to_numpy()), index=c.cell_id.to_numpy())
+    prov = d.cell_id.map(cp)
+    land = d if bool(prov.notna().all()) else d[prov.notna()]     # whole-Indonesia land view, shared (no per-click copy)
+    return d, prov, land
 
 
 if not DATA_FILE.exists():
@@ -64,10 +76,7 @@ if not DATA_FILE.exists():
     st.stop()
 
 meta = json.loads(META_FILE.read_text()) if META_FILE.exists() else {}
-df = load()
-df = df[df.month >= pd.Timestamp("2002-07-01")]
-if "last_complete_month" in meta:
-    df = df[df.month <= pd.Timestamp(meta["last_complete_month"])]
+df, prov_col, df_land = load_prepared(DATA_FILE.stat().st_mtime, meta.get("last_complete_month"))
 lon_min, lon_max, lat_min, lat_max = df.lon.min(), df.lon.max(), df.lat.min(), df.lat.max()
 modis_last = pd.Timestamp(meta["modis_last_month"]) if meta.get("modis_last_month") else None
 
@@ -104,74 +113,86 @@ def _scanner(filt, columns, batch=500_000):
 
 
 def collect_hotspots(start, end, geom, land_only):
-    """Raw detections inside the SAME area as the statistics, streamed and capped at HOT_LIMIT."""
-    shapely.prepare(geom)
-    land = land_geometry() if land_only else None
-    if land is not None:
-        shapely.prepare(land)
-    parts, total, truncated = [], 0, False
-    for batch in _scanner(hot_filter(start, end, geom), HOT_COLS, 200_000).to_batches():
-        b = batch.to_pandas()
-        b = b[_inside(geom, land, b.longitude.to_numpy(), b.latitude.to_numpy())]
-        parts.append(b)
-        total += len(b)
-        if total >= HOT_LIMIT:
-            truncated = True
-            break
-    out = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=HOT_COLS)
-    return out.head(HOT_LIMIT), truncated
-
-
-@st.cache_data(show_spinner="Counting raw alerts per ~1 km cell...", max_entries=6)
-def detail_counts(start, end, geom_wkt, land_only, months_t, _stamp):
-    geom, land = _prepared(geom_wkt, land_only)
-    acc = None
-    for batch in _scanner(hot_filter(start, end, geom), ["longitude", "latitude", "acq_date"]).to_batches():
-        b = batch.to_pandas()
-        lon, lat = b.longitude.to_numpy(), b.latitude.to_numpy()
-        keep = _inside(geom, land, lon, lat)
-        if len(months_t) < 12:
-            keep &= pd.to_datetime(b.acq_date).dt.month.isin(months_t).to_numpy()
-        if not keep.any():
-            continue
-        c = pd.DataFrame({"ix": np.floor((lon[keep] + 180) / DETAIL_DEG).astype("int64"),
-                          "iy": np.floor((lat[keep] + 90) / DETAIL_DEG).astype("int64")}).value_counts()
-        acc = c if acc is None else acc.add(c, fill_value=0)
-    return pd.DataFrame(columns=["ix", "iy", "n"]) if acc is None else acc.rename("n").reset_index()
-
-
-@st.cache_data(show_spinner="Counting alerts...", max_entries=8)
-def count_alerts(start, end, geom_wkt, land_only, months_t, _stamp):
-    geom, land = _prepared(geom_wkt, land_only)
-    tot = {"MODIS": 0, "VIIRS": 0}
-    for batch in _scanner(hot_filter(start, end, geom), ["sensor", "longitude", "latitude", "acq_date"]).to_batches():
-        b = batch.to_pandas()
-        keep = _inside(geom, land, b.longitude.to_numpy(), b.latitude.to_numpy())
-        if len(months_t) < 12:
-            keep &= pd.to_datetime(b.acq_date).dt.month.isin(months_t).to_numpy()
-        for s_, n_ in b.sensor[keep].astype(str).value_counts().items():
-            tot[s_] = tot.get(s_, 0) + int(n_)
-    return tot
-
-
-@st.cache_data(show_spinner="Comparing this month with the same days in previous years...", max_entries=6)
-def daily_ref_counts(geom_wkt, land_only, month, first_year, last_year, ref_sat, _stamp):
-    """Alerts per day (one reference satellite, so years are comparable) for one calendar month of each year."""
-    geom, land = _prepared(geom_wkt, land_only)
-    rows = []
-    for yr in range(first_year, last_year + 1):
-        start = dt.date(yr, month, 1)
-        end = (pd.Timestamp(start) + pd.offsets.MonthEnd(0)).date()
-        for batch in _scanner(hot_filter(start, end, geom), ["satellite", "longitude", "latitude", "acq_date"]).to_batches():
+    with heavy():
+        """Raw detections inside the SAME area as the statistics, streamed and capped at HOT_LIMIT."""
+        shapely.prepare(geom)
+        land = land_geometry() if land_only else None
+        if land is not None:
+            shapely.prepare(land)
+        parts, total, truncated = [], 0, False
+        for batch in _scanner(hot_filter(start, end, geom), HOT_COLS, 200_000).to_batches():
             b = batch.to_pandas()
-            b = b[b.satellite.astype(str) == ref_sat]
-            if b.empty:
-                continue
             b = b[_inside(geom, land, b.longitude.to_numpy(), b.latitude.to_numpy())]
-            rows.append(pd.DataFrame({"year": yr, "day": pd.to_datetime(b.acq_date).dt.day.to_numpy()}))
-    if not rows:
-        return pd.DataFrame(columns=["year", "day", "n"])
-    return pd.concat(rows).groupby(["year", "day"]).size().rename("n").reset_index()
+            parts.append(b)
+            total += len(b)
+            if total >= HOT_LIMIT:
+                truncated = True
+                break
+        out = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=HOT_COLS)
+        return out.head(HOT_LIMIT), truncated
+
+
+@st.cache_data(show_spinner="Counting raw alerts per ~1 km cell...", max_entries=3, ttl=1800)
+def detail_counts(start, end, geom_wkt, land_only, months_t, _stamp):
+    with heavy():
+        geom, land = _prepared(geom_wkt, land_only)
+        acc = None
+        for batch in _scanner(hot_filter(start, end, geom), ["longitude", "latitude", "acq_date"]).to_batches():
+            b = batch.to_pandas()
+            lon, lat = b.longitude.to_numpy(), b.latitude.to_numpy()
+            keep = _inside(geom, land, lon, lat)
+            if len(months_t) < 12:
+                keep &= pd.to_datetime(b.acq_date).dt.month.isin(months_t).to_numpy()
+            if not keep.any():
+                continue
+            c = pd.DataFrame({"ix": np.floor((lon[keep] + 180) / DETAIL_DEG).astype("int64"),
+                              "iy": np.floor((lat[keep] + 90) / DETAIL_DEG).astype("int64")}).value_counts()
+            acc = c if acc is None else acc.add(c, fill_value=0)
+        return pd.DataFrame(columns=["ix", "iy", "n"]) if acc is None else acc.rename("n").reset_index()
+
+
+@st.cache_data(show_spinner="Counting alerts...", max_entries=4, ttl=1800)
+def count_alerts(start, end, geom_wkt, land_only, months_t, _stamp):
+    with heavy():
+        geom, land = _prepared(geom_wkt, land_only)
+        tot = {"MODIS": 0, "VIIRS": 0}
+        for batch in _scanner(hot_filter(start, end, geom), ["sensor", "longitude", "latitude", "acq_date"]).to_batches():
+            b = batch.to_pandas()
+            keep = _inside(geom, land, b.longitude.to_numpy(), b.latitude.to_numpy())
+            if len(months_t) < 12:
+                keep &= pd.to_datetime(b.acq_date).dt.month.isin(months_t).to_numpy()
+            for s_, n_ in b.sensor[keep].astype(str).value_counts().items():
+                tot[s_] = tot.get(s_, 0) + int(n_)
+        return tot
+
+
+@st.cache_data(show_spinner="Comparing this month with the same days in previous years...", max_entries=3, ttl=1800)
+def daily_ref_counts(geom_wkt, land_only, month, first_year, last_year, ref_sat, _stamp):
+    with heavy():
+        """Alerts per day (one reference satellite, so years are comparable) for one calendar month of each year."""
+        geom, land = _prepared(geom_wkt, land_only)
+        rows = []
+        for yr in range(first_year, last_year + 1):
+            start = dt.date(yr, month, 1)
+            end = (pd.Timestamp(start) + pd.offsets.MonthEnd(0)).date()
+            for batch in _scanner(hot_filter(start, end, geom), ["satellite", "longitude", "latitude", "acq_date"]).to_batches():
+                b = batch.to_pandas()
+                b = b[b.satellite.astype(str) == ref_sat]
+                if b.empty:
+                    continue
+                b = b[_inside(geom, land, b.longitude.to_numpy(), b.latitude.to_numpy())]
+                rows.append(pd.DataFrame({"year": yr, "day": pd.to_datetime(b.acq_date).dt.day.to_numpy()}))
+        if not rows:
+            return pd.DataFrame(columns=["year", "day", "n"])
+        return pd.concat(rows).groupby(["year", "day"]).size().rename("n").reset_index()
+
+
+@st.cache_data(show_spinner=False)
+def load_cont(_stamp):
+    real = pd.read_parquet(CONT_FILE)
+    cells = real.drop_duplicates("cell_id")[["cell_id", "lon", "lat"]].reset_index(drop=True)
+    cells["on_land"] = pd.notna(assign_province(cells.lon.to_numpy(), cells.lat.to_numpy()))
+    return real, cells
 
 
 @st.cache_data(show_spinner="Matching cells to provinces (first run only)...")
@@ -207,8 +228,6 @@ def set_date_window(s_date: dt.date, e_date: dt.date):
 
 # =============================================================== sidebar: 1 where, 2 when, 3 what
 PROVS = load_provinces()
-cell_prov = cell_province(DATA_FILE.stat().st_mtime)
-prov_col = df.cell_id.map(cell_prov)
 
 st.sidebar.title("Burn Activity Calendar")
 method = st.sidebar.radio("Choose the area by", ["Province", "Drawing on map", "Coordinates"], key="method",
@@ -242,7 +261,7 @@ if method == "Province":
     if names:
         sub, region_geom = df[prov_col.isin(names)], unary_union([PROVS[n] for n in names])
     else:
-        sub, region_geom = df[prov_col.notna()], land_geometry()
+        sub, region_geom = df_land, land_geometry()
     polygon = None
     area_name = ", ".join(names) if 0 < len(names) <= 3 else (f"{len(names)} provinces" if names else "Indonesia")
 elif method == "Coordinates":
@@ -252,7 +271,8 @@ elif method == "Coordinates":
     e = c2.number_input("East", value=float(lon_max), format="%.3f")
     s_ = c1.number_input("South", value=float(lat_min), format="%.3f")
     n = c2.number_input("North", value=float(lat_max), format="%.3f")
-    region_geom, sub, area_name = box(w, s_, e, n), filter_bbox(df, w, s_, e, n), "Selected box"
+    covers_all = w <= lon_min and e >= lon_max and s_ <= lat_min and n >= lat_max
+    region_geom, sub, area_name = box(w, s_, e, n), (df if covers_all else filter_bbox(df, w, s_, e, n)), "Selected box"
 else:
     names = []
     st.sidebar.caption("Draw a rectangle or polygon on the map. Use 'Clear drawn area' to start again "
@@ -268,13 +288,13 @@ else:
 hidden_note = ""
 if mask_land and method != "Province":
     before = sub.n_hotspots.sum()
-    sub = sub[prov_col.reindex(sub.index).notna()]
+    sub = df_land if sub is df else sub[prov_col.reindex(sub.index).notna()]
     hidden_note = f"Sea-hiding removed {1 - sub.n_hotspots.sum() / max(before, 1e-9):.1%} of activity here."
 if sub.empty:
     if method == "Drawing on map" and polygon:
         st.warning("No land fire activity inside the drawn area, so everything is shown. Draw again or clear the area.")
         polygon, region_geom, area_name = None, box(lon_min, lat_min, lon_max, lat_max), "All of Indonesia (nothing drawn yet)"
-        sub = df[prov_col.notna()] if mask_land else df
+        sub = df_land if mask_land else df
     else:
         st.warning("No fire activity recorded in this area. Try a larger area.")
         st.stop()
@@ -432,7 +452,7 @@ if not cells.empty:
         w_ = np.log1p(cells[metric])
         w_ = (w_ / w_.quantile(0.98)).clip(0, 1)
         extent = max(np.ptp(cells.lon), np.ptp(cells.lat), 0.5)
-        top = cells.assign(weight=w_).nlargest(150_000, "weight")
+        top = cells.assign(weight=w_).nlargest(60_000, "weight")
         HeatMap(top[["lat", "lon", "weight"]].values.tolist(), radius=int(np.clip(14 - np.log2(extent), 5, 16)), blur=10,
                 min_opacity=0.25, max_zoom=9,
                 gradient={0.2: "#ffffb2", 0.4: "#fecc5c", 0.6: "#fd8d3c", 0.8: "#f03b20", 1.0: "#bd0026"},
@@ -650,11 +670,10 @@ with tab_hist:
         layers_c.append(alt.Chart(rule).mark_rule(color="#999999", strokeDash=[2, 2]).encode(x="month:T"))
         layers_c.append(alt.Chart(rule).mark_text(align="left", dx=4, dy=-4, baseline="bottom", color="#666666").encode(x="month:T", y=alt.value(8), text="t:N"))
         if show_real:
-            real_all = pd.read_parquet(CONT_FILE)
-            cell_ = real_all.drop_duplicates("cell_id")
+            real_all, cell_ = load_cont(CONT_FILE.stat().st_mtime)
             ins = shapely.contains_xy(region_geom, cell_.lon.to_numpy(), cell_.lat.to_numpy())
             if method != "Province" and mask_land:
-                ins &= pd.notna(assign_province(cell_.lon.to_numpy(), cell_.lat.to_numpy()))
+                ins &= cell_.on_land.to_numpy()
             real_a = real_all[real_all.cell_id.isin(set(cell_.cell_id[ins]))]
             ra = real_a.groupby("month")[metric].sum().reindex(ts[ts.month > modis_last].month, fill_value=0.0).rename("real").reset_index()
             layers_c.append(alt.Chart(ra.assign(series=N_REAL)).mark_line(strokeWidth=5, opacity=0.55).encode(x="month:T", y="real:Q", color=col))
@@ -749,11 +768,10 @@ with tab_val:
     after = pd.DatetimeIndex([])
 
     if CONT_FILE.exists() and modis_last is not None:
-        real_all = pd.read_parquet(CONT_FILE)
-        cell_ = real_all.drop_duplicates("cell_id")
+        real_all, cell_ = load_cont(CONT_FILE.stat().st_mtime)
         ins = shapely.contains_xy(region_geom, cell_.lon.to_numpy(), cell_.lat.to_numpy())
         if method != "Province" and mask_land:
-            ins &= pd.notna(assign_province(cell_.lon.to_numpy(), cell_.lat.to_numpy()))
+            ins &= cell_.on_land.to_numpy()
         real_a = real_all[real_all.cell_id.isin(set(cell_.cell_id[ins]))]
         after = pd.date_range(modis_last + pd.offsets.MonthBegin(1), full.index.max(), freq="MS")
         rs = real_a.groupby("month")[metric].sum().reindex(after, fill_value=0.0)
