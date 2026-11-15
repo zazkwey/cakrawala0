@@ -800,32 +800,32 @@ with tab_val:
                      f"{int((fr & fm).sum())} of {int(fr.sum())}" if fr.sum() else "n/a",
                      help="Would responders receive the same high-fire warning once MODIS retires?")
 
-            # ---- zoom into a range of monthly detections (most months are small, a few are huge)
+            # ---- zoom into a range of monthly detections (All months vs. Custom)
             vmax = float(max(cc.real.max(), cc.mapped.max(), 1.0))
-            step = float(10 ** int(np.floor(np.log10(vmax))))          # 10,000 when the biggest month is 14,000
-            presets = {"All months": None}
-            for k in range(int(np.ceil(vmax / step))):
-                lo_ex, hi_k = (-1.0 if k == 0 else k * step), (k + 1) * step
-                if ((cc.real > lo_ex) & (cc.real <= hi_k)).any():          # only offer ranges that contain months
-                    presets[f"{0 if k == 0 else k * step + 1:,.0f} - {hi_k:,.0f}"] = (lo_ex, hi_k)
-            presets["Custom"] = "custom"
+            step = float(10 ** int(np.floor(np.log10(vmax))))
             rc1, rc2 = st.columns([4, 1])
-            choice = rc1.radio(f"Show months where real MODIS recorded ({U})", list(presets), horizontal=True, key="val_range",
-                               help="Most months are small and a few are huge, so the big ones squash everything else. Pick a "
-                                    "range to zoom in; the chart, the table and the ratio below all follow it.")
-            log_scale = rc2.checkbox("Log scale", False, key="val_log",
-                                     help="Spreads out small months without cutting anything off.")
+            choice = rc1.radio(
+                f"Show months where real MODIS recorded ({U})",
+                ["All months", "Custom"],
+                horizontal=True,
+                key="val_range",
+                help="Most months are small and a few are huge, so the big ones squash everything else. Pick Custom "
+                     "to zoom into a specific range; the chart, the table and the ratio below all follow it.",
+            )
+            log_scale = rc2.checkbox(
+                "Log scale",
+                False,
+                key="val_log",
+                help="Spreads out small months without cutting anything off.",
+            )
             if choice == "All months":
                 mask, view_lo, view_hi = pd.Series(True, index=cc.index), 0.0, None
-            elif choice == "Custom":
+            else:
                 cu1, cu2 = st.columns(2)
                 lo = cu1.number_input(f"From ({U})", min_value=0.0, value=0.0, step=step, key="val_lo")
                 hi = cu2.number_input(f"To ({U})", min_value=0.0, value=float(np.ceil(vmax)), step=step, key="val_hi")
                 lo, hi = (hi, lo) if lo > hi else (lo, hi)
                 mask, view_lo, view_hi = (cc.real >= lo) & (cc.real <= hi), lo, hi
-            else:
-                lo_ex, hi = presets[choice]
-                mask, view_lo, view_hi = (cc.real > lo_ex) & (cc.real <= hi), max(lo_ex, 0.0), hi
             sel, fr_s, fm_s = cc[mask], fr[mask], fm[mask]
 
             if sel.empty:
