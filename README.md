@@ -119,5 +119,10 @@ Then put the CSVs in `data/raw/` and rerun the pipeline. A non-CSV answer from t
 - The hosted app runs on free infrastructure and may be slow or restart when many people use it at once.
 - The color ramp runs from green to red, which is not ideal for red-green color blindness. Each class is also named in the legend.
 
+## SI Usage
+Code in this repository was written with SI assistance (Claude, Anthropic).
+No data was generated, simulated, or altered by SI. All figures come from
+NASA FIRMS (MODIS C6.1, VIIRS C2).
+
 ## Attribution
 NASA LANCE FIRMS (earthdata.nasa.gov/firms). Esri World Shaded Relief basemap (optional NASA GIBS Blue Marble and OpenStreetMap). Boundaries and cities: Natural Earth (public domain).

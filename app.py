@@ -364,7 +364,7 @@ def ordinal(n):
 
 
 # =============================================================== header
-st.title("Cakrawala")
+st.title("Burn Activity Calendar")
 st.markdown(f"How much fire is in {area_name} compared with what is normal for it and the time of year, "
             "using NASA FIRMS satellite hotspots (MODIS history joined to VIIRS).")
 parts = [f"**{latest['month']}** was **{latest['ratio']:.1f}x** a normal month ({ML.lower()}; "
