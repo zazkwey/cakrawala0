@@ -1,112 +1,123 @@
-# Burn Activity Calendar: MODIS + VIIRS harmonized FIRMS hotspots (Indonesia first)
+# Burn Activity Calendar
+
+A burning-activity calendar for Indonesia built from NASA FIRMS active-fire hotspots. MODIS (2000 onward) and VIIRS (2012 onward) are joined into one MODIS-equivalent monthly series, so you can pick an area and a date range and see which months and years burned most, how the current month compares with the historical median, and download the numbers.
+
+Built for the NASA Space Apps Challenge on a harmonized burning activity calendar.
+
+**Live app:** https://cakrawala.streamlit.app
+<!-- Demo video / screenshots: add a link here -->
+
+## How it answers the challenge
+
+| The challenge asks for | Where it is |
+|---|---|
+| Harmonized MODIS + VIIRS hotspot series | **Harmonization** tab and the *Trend against normal* chart |
+| Select a region and a date range | Sidebar: province list, drawing on the map, or coordinates, plus `From` / `To` dates |
+| Burning calendar with a color ramp | **History → Calendar** |
+| Current month vs the historical median | **Right now**, and the *Compared with normal* calendar |
+| Anomalies against multi-year averages | **History → Months that stood out** |
+| Number of fires detected | *Hotspots detected* (default), *Fire-days* and *Fire intensity (FRP)* |
+| Downloadable CSV of hotspots | **Download** tab |
+| Interactive map (draw an area, enter lat/lon) | Map at the top of the page |
+
+## Using the app
+
+**Sidebar**
+1. *Where*: Province list, Drawing on map, or Coordinates.
+2. *When*: `From` and `To` dates in `DD/MM/YYYY` (default: the most recent 24 months; **Reset to full period** restores everything).
+3. *What to measure*: Hotspots detected, Fire-days, or Fire intensity (FRP). *Advanced* options: hide cells over the sea, and the baseline years that define "normal".
+
+**Map.** Draw a rectangle or polygon and everything below updates. Two styles: `Heatmap (smooth)` shows harmonized activity per ~5 km cell for all of Indonesia, and `Raw alerts (1 km)` shows every satellite detection per ~1 km cell (not harmonized, for areas up to about 4 million map pixels). Optional layers: cities (colored by burning within 25 km) and province outlines. You can also filter by calendar months (for example dry season only).
+
+**Tabs**
+- **Right now**: the current partial month against the same days of earlier years, with a last-7-days hotspot CSV.
+- **History**
+  - *Calendar*: green (fewer detections) through neutral (normal) to amber and red (higher, extreme), in both *Compared with normal* and *Amount* modes, with a Jan–Dec baseline table.
+  - *Trend against normal*: the harmonized series against the monthly normal. When the demo is active, the held-back real MODIS record is drawn as a red dashed line.
+  - *Months that stood out*: filterable anomaly table (period, difference vs normal, 95% band, ratio, severity) with a **Focus** button that zooms the map and calendar to that month.
+- **Harmonization**: a plain-English verdict for the selected area, with three sub-tabs: *Selected Area* (predicted vs real MODIS, month by month), *All-Indonesia Score Card* (national backtest metrics), and *How Validation Works*.
+- **Download**: monthly summary CSV, 5 km cell-by-month CSV, and raw hotspot CSV (capped at 300,000 rows).
+- **About the data**: measure definitions, harmonization overview, caveats and credits.
+
+## The demo: how harmonization is tested
+
+Terra and Aqua (MODIS) are still flying, so the pipeline is run in `--demo` mode: it pretends MODIS ended in December 2022, lets VIIRS fill 2023 onward, and keeps the real MODIS aside to check the result. Everything after December 2022 in the calendar is therefore a VIIRS-based estimate, and the **Harmonization** tab shows how close it came. When MODIS really ends, pass its real last month with `--modis-last YYYY-MM-01`.
+
+**Try it: October 2023 (El Niño season).** It falls after the simulated cutoff. Choose all provinces, measure *Hotspots detected*, dates 01/01/2023 to 31/10/2023. Read October 2023 in **History → Calendar** and in *Months that stood out*, then compare the estimate with the held-back real MODIS in the **Harmonization** tab.
+<!-- Optional, once you have the app's numbers, add one line here:
+     "Harmonized (VIIRS only): X times normal, rank N of M. Real MODIS: Y times normal." -->
+
+## Rules the app applies (so numbers match everywhere)
+- Starts July 2002 (Terra flew alone before Aqua joined). The baseline for "normal" starts a year later by default and uses real-MODIS years only, because mapped VIIRS years are biased low.
+- The calendar and statistics use complete months only. The current partial month is handled by **Right now**, using raw alerts from one VIIRS satellite (SNPP, or NOAA-20 when SNPP's data is older), so the years compared are consistent.
+- Persistent cells (flares, industry) are removed from the calendar and from the hotspot CSV.
+- The hotspot CSV uses the same area and land mask as the calendar, and is streamed and capped at 300,000 rows. The hotspot files include the newest days; the calendar does not.
+- Comparison to normal is `(value + 1) / (median + 1)`. A month is "unusual" only if its 95% band lies outside the interquartile range **and** it is at least 1.5x or at most 2/3 of the median.
+- Calendar classes: under 1/2, 1/2 to 2/3, 2/3 to 1.5x (normal), 1.5 to 2x, 2 to 4x, over 4x. The map color scale is logarithmic.
+
+## How it works
 
 ```
 fire_*.csv (FIRMS)  ->  clean.py  ->  grid.py  ->  harmonize.py  ->  data/processed/  ->  app.py (Streamlit)
                         types, confidence,  5 km cell x    MODIS-equivalent   harmonized_monthly.parquet
-                        NRT/archive merge   month totals   series (friend)    hotspots/year=YYYY/*.parquet
+                        NRT/archive merge   month totals   series + backtest  hotspots/year=YYYY/*.parquet
                                                                               meta.json (QC, backtest, last complete month)
 ```
 
-## Quick start
-```bash
-pip install -r requirements.txt
-python smoke_test.py            # end-to-end check on synthetic data in a temp folder (real data untouched)
-```
-Real data:
-```bash
-# copy your fire_archive_*.csv and fire_nrt_*.csv (MODIS + VIIRS) into data/raw/
-python inspect_raw.py                                              # coverage + overlap check
-python run_pipeline.py --indonesia --demo
-python -m streamlit run app.py                                     # http://localhost:8501
-```
-`--demo` = `--modis-last 2022-12-01`: pretend MODIS ended in Dec 2022. The model only sees data up to then, VIIRS fills the later
-months, and the real MODIS is kept aside to check the result (that is the backtest and the app's "Does it work?" tab).
-Why: Terra and Aqua still fly, so without it the output is MODIS only and nothing is harmonized (the pipeline warns).
-When MODIS really ends, pass its real last month: `--modis-last YYYY-MM-01`. `--backtest CUTOFF` defaults to the same month.
-
-## Files
 | file | role |
 |---|---|
-| `clean.py` | read FIRMS CSVs, auto-detect sensor/satellite/archive vs NRT, filter type + confidence, QC counters |
-| `grid.py` | 0.05 deg cell x sensor x month aggregates, persistent-source removal |
-| `harmonize.py` | calibration + splice + `backtest()` |
-| `climatology.py`, `app.py`, `geo.py` | queries, calendar, anomalies, maps, downloads |
-| `run_pipeline.py` | runs everything, writes `data/processed/*` |
-| `smoke_test.py` | PASS/FAIL check of pipeline + app on synthetic data |
+| `clean.py` | read FIRMS CSVs, detect sensor, satellite and archive vs NRT, filter type and confidence, QC counters |
+| `grid.py` | 0.05 degree cell by sensor by month aggregates, persistent-source removal |
+| `harmonize.py` | calibration, splice and `backtest()` (95% bands from leave-one-year-out cross-validation) |
+| `climatology.py`, `geo.py`, `app.py` | queries, calendar, anomalies, maps, downloads |
+| `run_pipeline.py` | runs everything and writes `data/processed/*` |
+| `smoke_test.py` | PASS/FAIL end-to-end check of pipeline and app on synthetic data |
 | `synthetic.py`, `demo_query.py`, `inspect_raw.py`, `download.py` | helpers |
 
-## Contract: `harmonized_monthly.parquet`
-`cell_id, lon, lat, month, source` and, for `fire_days`, `n_hotspots`, `frp_sum`: `<metric>`, `<metric>_lo`, `<metric>_hi`.
-`source` is `MODIS` or `VIIRS_mapped`. Months with no fire have no row (the app fills zeros). Any new harmonization
-method must keep this schema (and `lo <= value <= hi`; `smoke_test.py` checks it).
+**Data contract: `harmonized_monthly.parquet`.** Columns `cell_id, lon, lat, month, source` and, for each of `fire_days`, `n_hotspots`, `frp_sum`: `<metric>`, `<metric>_lo`, `<metric>_hi`. `source` is `MODIS` or `VIIRS_mapped`. Months with no fire have no row (the app fills zeros). Any new harmonization method must keep this schema and `lo <= value <= hi`; `smoke_test.py` checks it.
 
-## The map
-One map does everything: choose "Drawing on map", draw a rectangle or polygon, and the calendar, KPIs and map all update.
-- **Map styles:** `Heatmap (smooth)` (harmonized MODIS-equivalent activity per ~5 km cell, works for all of Indonesia) and
-  `Raw alerts (1 km)` (every satellite detection per ~1 km cell, not harmonized, for areas up to ~20 x 20 degrees).
-- **Overlays & notes:** Optional city exposure markers (within 25 km) and province outlines. When sea-hiding is active for drawn
-  areas or coordinate boxes, the dropped-activity note is shown directly under the **Map** header. Basemap attributions are
-  compactly styled while keeping tile provider credits intact.
-- Not included: forest cover layer (needs the JRC GFC2020 raster, not bundled).
+## Run it yourself
 
-## App layout
-- **Sidebar:**
-  1. *Where*: Province list, Drawing on map, or Coordinates.
-  2. *When*: `From` and `To` date inputs in `DD/MM/YYYY` format (defaults to the most recent 24 months, with a one-click
-     **Reset to full period** button).
-  3. *What to measure*: Hotspots detected, Fire-days, or Fire intensity (FRP), plus *Advanced* options (sea mask and baseline years).
-- **Map:** Interactive Folium map on top with optional calendar-month filtering (e.g., dry season only) and nearby-city exposure table.
-- **Tabs:**
-  - **Right now:** Current partial month vs. the same days of previous years (with full legend labels and a last-7-days hotspot CSV).
-  - **History:**
-    - *Calendar*: Green-to-red heatmap (green = fewer/lower detections, neutral = normal, amber/red = higher/extreme detections) for
-      both *Compared with normal* and *Amount* modes, paired with a collapsible **Jan–Dec normal baseline & comparison** table.
-    - *Trend against normal*: Harmonized series against the monthly normal, with a high-contrast red dashed overlay for the withheld
-      real MODIS record when `--demo` / `--modis-last` is active.
-    - *Months that stood out*: Filterable anomaly table (`DD/MM/YYYY` period bounds, signed difference vs. normal, 95% band, ratio,
-      and severity status) with a one-click **Focus DD/MM/YYYY – DD/MM/YYYY** button to zoom the map and calendar to any standout month.
-  - **Does it work?:** Opens with a plain-English verdict banner for the selected area, organized into three sub-tabs:
-    1. *Selected Area* (KPIs, predicted-vs.-real scatter plot, and a side-by-side month-by-month comparison table),
-    2. *All-Indonesia Score Card* (national backtest metrics), and
-    3. *How Validation Works* (3-step explanation).
-  - **Download:** Monthly summary CSV, 5 km cell-by-month map CSV, and raw hotspot CSV (capped at 300,000 rows).
-  - **About the data:** Metric definitions, harmonization overview, caveats, and credits.
+```bash
+pip install -r requirements.txt
+python smoke_test.py            # end-to-end check on synthetic data in a temp folder
+```
 
-## Rules the app applies (so numbers match everywhere)
-- Starts Jul 2002 (Terra flew alone before Aqua joined). Baseline for "normal" starts a year later by default.
-- Defaults to a 24-month display window for readability; if fewer than 12 months are selected, the **History** tab prompts to expand
-  the date range for multi-year seasonal and trend analysis.
-- Calendar and statistics use complete months only (`meta.json: last_complete_month`); the current partial month is handled by the
-  **Right now** tab with raw alerts from one VIIRS satellite (SNPP, or NOAA-20 when SNPP's data is older), so years are comparable.
-- Persistent cells (flares/industry) removed from the calendar AND the hotspot CSV.
-- Hotspot CSV uses the same area and land mask as the calendar, streamed and capped at 300,000 rows. The hotspot files include the
-  newest days (the calendar does not).
-- 'Normal' baseline defaults to the real-MODIS years only (mapped VIIRS years are biased low).
-- Comparison to normal uses `(value + 1) / (median + 1)`. "Unusual" needs the 95% band outside the IQR AND `>= 1.5x` or `<= 2/3` of the median.
+The processed data used by the live app is already in `data/processed/`, so `python -m streamlit run app.py` works right away (http://localhost:8501).
 
-## Continuity check
-With `--modis-last`, the pipeline keeps the real MODIS after that month aside (`continuity_modis.parquet`). The app overlays it as a
-red dashed line on the VIIRS-mapped series for the selected area and reports whether the same months would be flagged 'high' from VIIRS alone.
+To rebuild from raw data (about 600 MB, not included), download from NASA FIRMS (https://firms.modaps.eosdis.nasa.gov/download/) for 95 to 141 E, 11 S to 6 N, from 2000-11-01 to the latest day:
 
-## Note for the harmonization owner
-`harmonize.py` changed: bands now come from leave-one-year-out cross-validation (`_cv_error_bands`), and `fit_ratio` /
-`predict` were refactored around it. The output schema is unchanged. Merge this into your version before editing further.
+- MODIS Collection 6.1: archive and near-real-time (`fire_archive_M-C61_*.csv`, `fire_nrt_M-C61_*.csv`)
+- VIIRS S-NPP 375 m: archive and NRT (`fire_archive_SV-C2_*.csv`, `fire_nrt_SV-C2_*.csv`)
+- VIIRS NOAA-20 375 m: archive and NRT (`fire_archive_J1V-C2_*.csv`, `fire_nrt_J1V-C2_*.csv`)
 
-## Known limits (also shown in the app's Caveats box)
-- Bands are 95% bands from leave-one-year-out cross-validation. Out-of-time backtest (MODIS pretended to end Dec 2022, scored on 2023-2026):
-  coverage 86% (hotspots, fire days) and 90% (FRP). Total prediction vs real MODIS: 89% (hotspots), 74% (fire days), 100% (FRP).
-  So fire days under-predict intense seasons; hotspot count is the best validated metric and is the app's default.
-- Calibrating on SNPP only was tested: fire-day bias improves (74% -> 87%) but correlation drops (0.96 -> 0.92). Not adopted.
+```bash
+# put the CSVs in data/raw/
+python inspect_raw.py                       # coverage and overlap check
+python run_pipeline.py --indonesia --demo   # clean, grid, harmonize, backtest
+python -m streamlit run app.py
+```
+
+`--demo` is shorthand for `--modis-last 2022-12-01`. `--backtest CUTOFF` defaults to the same month.
+
+**Refreshing recent days (optional).** Get a free key at https://firms.modaps.eosdis.nasa.gov/api/map_key/ (5,000 requests per 10 minutes) and keep it out of git:
+
+```bash
+python download.py --key $FIRMS_MAP_KEY --source VIIRS_SNPP_NRT --bbox 94 -11.5 141.5 6.5 --start 2026-11-01 --end 2026-11-14
+```
+Then put the CSVs in `data/raw/` and rerun the pipeline. A non-CSV answer from the API (bad key, rate limit) raises an error instead of being skipped.
+
+## Known limits
+- **Validation (MODIS pretended to end Dec 2022, scored on 2023 to 2026).** About 86% of real monthly values fall inside the 95% bands for hotspots and fire-days, and 90% for FRP. Total prediction versus real MODIS is 89% (hotspots), 74% (fire-days) and 100% (FRP). Fire-days under-predict intense seasons, so hotspot count is the best-validated measure and the default.
+- Calibrating on SNPP only was tested: fire-day bias improves (74% to 87%) but correlation drops (0.96 to 0.92), so it was not adopted.
+- **Right now** compares one satellite against its own earlier years, so its baseline is shorter than the calendar's.
 - Cell-level maps are not comparable across the MODIS-to-VIIRS switch.
-- Province outlines: Natural Earth, 33 provinces (no Kalimantan Utara / new Papua provinces). Land mask hides about 1.4% of activity nationally.
-- FIRMS `type != 0` rows (volcano, static, offshore) are dropped, about 5% of rows; coastal detections flagged offshore are lost.
-- Grid is in degrees: fine near the equator.
-
-## Refreshing recent days (optional)
-Free key: https://firms.modaps.eosdis.nasa.gov/api/map_key/ (5,000 requests / 10 min). Keep it out of git.
-`python download.py --key $FIRMS_MAP_KEY --source VIIRS_SNPP_NRT --bbox 94 -11.5 141.5 6.5 --start 2026-11-01 --end 2026-11-14`
-then drop the CSVs in `data/raw/` and rerun the pipeline. A non-CSV answer (bad key, rate limit) now raises instead of being skipped.
+- Province outlines are Natural Earth (33 provinces), so Kalimantan Utara and the newer Papua provinces are not separate areas. The land mask hides about 1.4% of activity nationally.
+- FIRMS `type != 0` rows (volcano, static, offshore) are dropped, about 5% of rows, so coastal detections flagged offshore are lost.
+- VIIRS NOAA-21 is not used. The grid is in degrees, which is fine near the equator.
+- Not included: a forest-cover layer (needs the JRC GFC2020 raster).
+- The hosted app runs on free infrastructure and may be slow or restart when many people use it at once.
+- The color ramp runs from green to red, which is not ideal for red-green color blindness. Each class is also named in the legend.
 
 ## Attribution
-NASA LANCE FIRMS (earthdata.nasa.gov/firms). Esri World Shaded Relief basemap (optional NASA GIBS Blue Marble and OpenStreetMap).
-Boundaries/cities: Natural Earth (public domain; verify).
+NASA LANCE FIRMS (earthdata.nasa.gov/firms). Esri World Shaded Relief basemap (optional NASA GIBS Blue Marble and OpenStreetMap). Boundaries and cities: Natural Earth (public domain).
