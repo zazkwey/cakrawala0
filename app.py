@@ -893,8 +893,7 @@ with tab_dl:
     monthly = pd.DataFrame({"month": ms.index.strftime("%Y-%m"), f"{metric}": ms["value"].round(2), "lower_95": ms["lo"].round(2),
                             "upper_95": ms["hi"].round(2), "normal_median": ms["median"].round(2),
                             "times_normal": ms["ratio_to_median"].round(3), "flag": ms["flag"]})
-    st.markdown("**1. Monthly summary**: one row per month for the whole area. Columns: month, the measure, 95% band, the normal for "
-                "that month, how many times normal, and a high/low flag. Use it for a report table or your own chart.")
+    st.markdown("**1. Monthly summary**: one row per month for the whole area.")
     st.download_button(f"Download monthly summary ({len(monthly)} rows, CSV)", monthly.to_csv(index=False),
                        f"monthly_summary_{tag}_{rng}.csv", "text/csv", key="dl_monthly")
     st.markdown("**2. Map data (5 km cells by month)**: one row per cell and month with the harmonized values and their bands. "

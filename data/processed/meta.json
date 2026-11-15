@@ -1,0 +1,46 @@
+{
+  "last_complete_month": "2026-10-01",
+  "data_end_by_satellite": {
+    "MODIS/Aqua": "2026-11-13",
+    "MODIS/Terra": "2026-11-14",
+    "VIIRS/NOAA20": "2026-11-13",
+    "VIIRS/SNPP": "2026-11-02"
+  },
+  "backtest": {
+    "fire_days": {
+      "n_region_months": 1300,
+      "bias_ratio": 0.7426339380173719,
+      "corr_log": 0.9647786450185688,
+      "mape_pct": 33.35873983739837,
+      "coverage_95": 0.8576923076923076
+    },
+    "n_hotspots": {
+      "n_region_months": 1300,
+      "bias_ratio": 0.8937496485172036,
+      "corr_log": 0.9648908596925875,
+      "mape_pct": 34.488890947324,
+      "coverage_95": 0.8638461538461538
+    },
+    "frp_sum": {
+      "n_region_months": 1300,
+      "bias_ratio": 0.9969480429663649,
+      "corr_log": 0.9335330100920549,
+      "mape_pct": 57.34706264766736,
+      "coverage_95": 0.8969230769230769
+    }
+  },
+  "backtest_cutoff": "2022-12",
+  "harmonization_active": true,
+  "modis_last_month": "2022-12-01",
+  "qc": {
+    "1_rows_read": 7809151,
+    "2_rows_inside_bbox": 7809151,
+    "removed_duplicates": 0,
+    "removed_low_confidence": 470787,
+    "removed_not_vegetation_fire_type": 429056,
+    "removed_nrt_already_in_archive": 0,
+    "hotspots_after_cleaning": 6909308,
+    "persistent_cells_dropped": 99,
+    "hotspots_exported": 6814757
+  }
+}
