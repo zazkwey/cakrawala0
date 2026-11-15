@@ -218,7 +218,7 @@ all_months = pd.date_range(df.month.min(), df.month.max(), freq="MS")
 y0, y1 = int(all_months.min().year), int(all_months.max().year)
 min_date = all_months.min().date()
 max_date = (all_months.max() + pd.offsets.MonthEnd(0)).date()
-default_start = max(min_date, (all_months.max() - pd.DateOffset(months=23)).date())
+default_start = min_date
 
 if "start_date" not in st.session_state:
     st.session_state["start_date"] = default_start
