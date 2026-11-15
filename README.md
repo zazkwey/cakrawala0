@@ -1,4 +1,4 @@
-# Burn Activity Calendar
+# Cakrawala | Burn Activity Calendar
 
 A burning-activity calendar for Indonesia built from NASA FIRMS active-fire hotspots. MODIS (2000 onward) and VIIRS (2012 onward) are joined into one MODIS-equivalent monthly series, so you can pick an area and a date range and see which months and years burned most, how the current month compares with the historical median, and download the numbers.
 
