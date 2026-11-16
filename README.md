@@ -5,7 +5,6 @@ A burning-activity calendar for Indonesia built from NASA FIRMS active-fire hots
 Built for the NASA Space Apps Challenge on a harmonized burning activity calendar.
 
 **Live app:** https://cakrawala.streamlit.app
-<!-- Demo video / screenshots: add a link here -->
 
 ## How it answers the challenge
 
@@ -52,7 +51,7 @@ Terra and Aqua (MODIS) are still flying, so the pipeline is run in `--demo` mode
 - The calendar and statistics use complete months only. The current partial month is handled by **Right now**, using raw alerts from one VIIRS satellite (SNPP, or NOAA-20 when SNPP's data is older), so the years compared are consistent.
 - Persistent cells (flares, industry) are removed from the calendar and from the hotspot CSV.
 - The hotspot CSV uses the same area and land mask as the calendar, and is streamed and capped at 300,000 rows. The hotspot files include the newest days; the calendar does not.
-- Comparison to normal is `(value + 1) / (median + 1)`. A month is "unusual" only if its 95% band lies outside the interquartile range **and** it is at least 1.5x or at most 2/3 of the median.
+- Comparison to normal, the 95% band and the high/low flags are defined in the Harmonization method section below.
 - Calendar classes: under 1/2, 1/2 to 2/3, 2/3 to 1.5x (normal), 1.5 to 2x, 2 to 4x, over 4x. The map color scale is logarithmic.
 
 ## How it works
@@ -75,6 +74,67 @@ fire_*.csv (FIRMS)  ->  clean.py  ->  grid.py  ->  harmonize.py  ->  data/proces
 | `synthetic.py`, `demo_query.py`, `inspect_raw.py`, `download.py` | helpers |
 
 **Data contract: `harmonized_monthly.parquet`.** Columns `cell_id, lon, lat, month, source` and, for each of `fire_days`, `n_hotspots`, `frp_sum`: `<metric>`, `<metric>_lo`, `<metric>_hi`. `source` is `MODIS` or `VIIRS_mapped`. Months with no fire have no row (the app fills zeros). Any new harmonization method must keep this schema and `lo <= value <= hi`; `smoke_test.py` checks it.
+
+## Harmonization method
+
+The goal is one monthly series per 5 km cell in MODIS-equivalent units, so that the sensor of origin no longer matters. The method is deliberately simple and transparent: one multiplicative ratio per region and season, calibrated on the years where both sensors fly, with uncertainty bands measured by cross-validation.
+
+**Notation.** $c$ = 0.05° cell, $r$ = 5° × 5° region containing the cell, $t$ = month, $\mu(t)$ = calendar month of the year (1 to 12), $s \in \{\text{MODIS}, \text{VIIRS}\}$. For each cell, sensor and month three measures $x$ are computed:
+
+| measure | definition |
+|---|---|
+| `n_hotspots` | number of detections |
+| `fire_days` | number of distinct dates with at least one detection |
+| `frp_sum` | sum of fire radiative power, in MW |
+
+**Pipeline**
+
+1. **Clean** (`clean.py`). Merge archive and near-real-time files (NRT rows are kept only after the last archive date of the same satellite), drop duplicates, keep only vegetation-fire detections (FIRMS `type = 0`), and drop low-confidence detections (MODIS confidence below 30, VIIRS class `low`).
+2. **Grid** (`grid.py`). Aggregate to cell × sensor × month. Cells that burn in more than 50% of all months of a sensor's record (gas flares, industry) are removed.
+3. **Sampling effort.** Let $n_{s,t}$ be the number of satellites of sensor $s$ that reported in month $t$. VIIRS goes from 1 to 2 satellites over time, which would create a fake rise, so every measure is divided by it:
+
+$$\tilde{x}^{\,s}_{c,t} = \frac{x^{\,s}_{c,t}}{n_{s,t}}$$
+
+4. **Overlap period.** $O$ is the set of months from January 2013 onward in which both sensors reported. At least 12 months are required.
+5. **Ratio per region and season.** Sum the per-satellite values over the cells of a region, $M_{r,t}=\sum_{c\in r}\tilde{x}^{\,\text{MODIS}}_{c,t}$ and $V_{r,t}=\sum_{c\in r}\tilde{x}^{\,\text{VIIRS}}_{c,t}$, then
+
+$$k_{r,\mu} = \frac{\sum_{t \in O,\ \mu(t)=\mu} M_{r,t}}{\sum_{t \in O,\ \mu(t)=\mu} V_{r,t}}$$
+
+   A ratio is used only if $\sum V > 0$ and $\sum (M+V) \ge 20$. Otherwise the code falls back to the same ratio pooled over all regions for that month of the year ($k_\mu$), and finally to one overall ratio ($k_{\text{all}}$). One ratio is fitted separately for each of the three measures.
+6. **Map VIIRS to MODIS-equivalent.** MODIS flies two satellites (Terra and Aqua), so the per-satellite value is scaled back up by $N_{\text{ref}} = 2$:
+
+$$\hat{x}_{c,t} = \frac{x^{\,\text{VIIRS}}_{c,t}}{n_{\text{VIIRS},t}} \; k_{r(c),\,\mu(t)} \; N_{\text{ref}}$$
+
+7. **Splice.** Real MODIS is used up to its last month $T_M$ and mapped VIIRS after it. In the demo build, $T_M$ is set to December 2022:
+
+$$x^{*}_{c,t} = \begin{cases} x^{\,\text{MODIS}}_{c,t} & t \le T_M \quad (\text{source} = \text{MODIS}) \\ \hat{x}_{c,t} & t > T_M \quad (\text{source} = \text{VIIRS\_mapped}) \end{cases}$$
+
+8. **Uncertainty bands (leave-one-year-out cross-validation).** For each year $y$ in the overlap, the region-months of that year are predicted from ratios fitted on the other years, $\hat{M}^{(-y)}_{r,t} = V_{r,t}\,k^{(-y)}_{r,\mu}$, and the log error is kept:
+
+$$e_{r,t} = \ln\frac{M_{r,t}+1}{\hat{M}^{(-y)}_{r,t}+1}$$
+
+   The errors are pooled and split into up to four size classes by the size of the predicted total. In each class $b$, the 2.5th and 97.5th percentiles give $q^{lo}_b$ and $q^{hi}_b$. For a mapped region-month with estimated total $T_{r,t}=\sum_{c\in r}\hat{x}_{c,t}$ in class $b$:
+
+$$lo = \max\big((T+1)\,e^{q^{lo}_b}-1,\ 0\big), \qquad hi = (T+1)\,e^{q^{hi}_b}-1$$
+
+   The bands of the cells are scaled so that they add up exactly to the region band, which treats cell errors as fully correlated (conservative):
+
+$$\hat{x}^{\,lo}_{c,t} = \hat{x}_{c,t}\,\min\!\Big(\tfrac{lo}{T},\,1\Big), \qquad \hat{x}^{\,hi}_{c,t} = \hat{x}_{c,t}\,\max\!\Big(\tfrac{hi}{T},\,1\Big)$$
+
+   Real MODIS months have no band ($lo = hi = x$).
+9. **Validate** (`backtest()`). Pretend MODIS ended at a cutoff, fit on the months before it, predict the region-months after it from VIIRS, and compare with the MODIS that really exists. Reported: $\text{bias}=\sum \text{pred} / \sum \text{obs}$, the correlation of $\ln(1+\text{obs})$ with $\ln(1+\text{pred})$, the median absolute percentage error, and the coverage $\text{mean}\big[\,lo \le \text{obs} \le hi\,\big]$.
+
+**From series to calendar and anomalies** (`climatology.py`). For a chosen set of baseline years $B$, the normal for calendar month $\mu$ is the median of that month over $B$, and each month is compared with it:
+
+$$\text{normal}_\mu = \underset{y \in B}{\text{median}}\; x^{*}_{y,\mu}, \qquad \rho_{y,\mu} = \frac{x^{*}_{y,\mu}+1}{\text{normal}_\mu + 1}$$
+
+A month is flagged **high** if its band lies above the 75th percentile of the baseline and $\rho \ge 1.5$, and **low** if its band lies below the 25th percentile and $\rho \le 2/3$. The "+1" keeps the ratio defined when the normal is zero.
+
+**What the method assumes, and where it is approximate**
+- The ratio depends only on region and month of the year, not on how intense the season is. That is why intense seasons are under-predicted for `fire_days`.
+- $n_{s,t}$ counts satellites that reported anywhere in the study area in that month, not days of coverage.
+- The error size classes in step 8 are fitted on the per-satellite scale but looked up from the two-satellite total $T$, a small approximation.
+- Neither SNPP-only calibration nor per-cell ratios are used in the published build (SNPP-only was tested and not adopted, see Known limits).
 
 ## Run it yourself
 
